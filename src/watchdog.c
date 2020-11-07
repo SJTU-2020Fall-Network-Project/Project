@@ -10,63 +10,102 @@
 
 // Link layer
 typedef struct {
-	u_char DestMac[6];
-	u_char SrcMac[6];
-	u_char Etype[2];
+	u_char dest_mac[6];
+	u_char src_mac[6];
+	u_char etype[2];
 }ETHHEADER;
 
 // IP layer
 typedef struct {
-	int header_len:4;
-	int version:4;
-	u_char tos:8;
-	int total_len:16;
-	int ident:16;
-	int flags:16;
-	u_char ttl:8;
-	u_char proto:8;
-	int checksum:16;
+	uint8_t ver_ihl;
+	uint8_t tos;
+	uint16_t total_len;
+	uint16_t ident;
+	uint16_t flags;
+	uint8_t ttl;
+	uint8_t proto;
+	uint16_t checksum;
 	u_char sourceIP[4];
 	u_char destIP[4];
 }IPHEADER;
+
+// TCP layer
+typedef struct {
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint32_t seq;
+	uint32_t ack;
+	uint8_t data_offset; // 4 bits
+	uint8_t flags;
+#define FIN 0x01
+#define SYN 0x02
+#define RST 0x04
+#define PSH 0x08
+#define ACK 0x10
+#define URG 0x20
+#define ECE 0x40
+#define CWR 0x80
+	uint16_t window_size;
+	uint16_t checksum;
+	uint16_t urgent_p;
+}TCPHEADER;
 
 // 
 char *Proto[] = {
 	"Reserved","ICMP","IGMP","GGP", "IP","ST","TCP"
 };
+// 17 = "UDP"
+char *str_flags[] = { "[]", "[FIN]", "[SYN]", "[SYN, FIN]", "[RST]", "[RST, FIN]", "[RST, SYN]",
+					 "[RST, SYN, FIN]", "[PSH]", "[PSH, FIN]", "[PSH, SYN]",  "[PSH, SYN, FIN]",
+					 "[PSH, RST]", "[PSH, RST, FIN]", "[PSH, RST, SYN]", "[PSH, RST, SYN, FIN]", 
+					 "[ACK]", "[ACK, FIN]", "[ACK, SYN]", "[ACK, SYN, FIN]", "[ACK, RST]", 
+					 "[ACK, RST, FIN]", "[ACK, RST, SYN]", "[ACK, RST, SYN, FIN]", "[ACK, PSH]", 
+					 "[ACK, PSH, FIN]", "[ACK, PSH, SYN]", "[ACK, PSH, SYN, FIN]", 
+					 "[ACK, PSH, RST]", "[ACK, PSH, RST, FIN]", "[ACK, PSH, RST, SYN]",
+					 "[ACK, PSH, RST, SYN, FIN]" };
 
 void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *pkt_data) {
+	static struct timeval last_ts;
+	struct timeval now_ts;
 	ETHHEADER *eth_header = (ETHHEADER *)pkt_data;
-	printf("-------------Begin Analysis----------------\n");
-	printf("-------------------------------------------\n");
+
 	printf("Packet length: %d \n", header->len);
 	
-	if(header->len>=14){
+	if(header->len>=14 + 4) { // ether_header_len + ether_tailer_len
         IPHEADER *ip_header=(IPHEADER*)(pkt_data+14);
         //解析协议类型
-        char strType[100];
-        if(ip_header->proto>7)
-            strcpy(strType,"IP/UNKNWN");
-        else
-            strcpy(strType,Proto[ip_header->proto]);
+        if(ip_header->proto != 6) return;
+		
+		TCPHEADER *tcp_header = (TCPHEADER *)(pkt_data+14+((ip_header->ver_ihl & 0x0F)<<2));
+       	
+		// need to check RST?
+		int syn = tcp_header->flags & SYN;
+		int ack = tcp_header->flags & ACK;
+		if (syn && !ack) { 
+				printf("begin to connecting\n");
+				last_ts.tv_sec = header->ts.tv_sec;
+				last_ts.tv_usec = header->ts.tv_usec;
+		}
+		if (last_ts.tv_usec > header->ts.tv_usec) {
+			now_ts.tv_sec = header->ts.tv_sec - last_ts.tv_sec - 1;
+			now_ts.tv_usec = header->ts.tv_usec + 1000000 - last_ts.tv_usec;
+		} else {
+			now_ts.tv_sec = header->ts.tv_sec - last_ts.tv_sec;
+			now_ts.tv_usec = header->ts.tv_usec - last_ts.tv_usec;
+		}
 
-        printf("Source MAC : %02X-%02X-%02X-%02X-%02X-%02X==>",eth_header->SrcMac[0],eth_header->SrcMac[1],eth_header->SrcMac[2],eth_header->SrcMac[3],eth_header->SrcMac[4],eth_header->SrcMac[5]);
-        printf("Dest   MAC : %02X-%02X-%02X-%02X-%02X-%02X\n",eth_header->DestMac[0],eth_header->DestMac[1],eth_header->DestMac[2],eth_header->DestMac[3],eth_header->DestMac[4],eth_header->DestMac[5]);
+			
+		printf("%ld.%06ld : Source IP : %d.%d.%d.%d ==> ", now_ts.tv_sec, now_ts.tv_usec, ip_header->sourceIP[0], ip_header->sourceIP[1], ip_header->sourceIP[2], ip_header->sourceIP[3]);
+		printf("Dest   IP : %d.%d.%d.%d\n", ip_header->destIP[0], ip_header->destIP[1], ip_header->destIP[2], ip_header->destIP[3]);
+		printf("            seq %u , ack %u\n", tcp_header->seq, tcp_header->ack);
+		printf("            %s\n", str_flags[tcp_header->flags & 0x1F]);
+		printf("            window size: %d Bytes", tcp_header->window_size);
+	
 
-        printf("Source IP : %d.%d.%d.%d==>",ip_header->sourceIP[0],ip_header->sourceIP[1],ip_header->sourceIP[2],ip_header->sourceIP[3]);
-        printf("Dest   IP : %d.%d.%d.%d\n",ip_header->destIP[0],ip_header->destIP[1],ip_header->destIP[2],ip_header->destIP[3]);
 
-        printf("Protocol : %s\n",strType);
-
-        //显示数据帧内容
-        int i;
-        for(i=0; i<(int)header->len; ++i)  {
-            printf(" %02x", pkt_data[i]);
-            if( (i + 1) % 16 == 0 )
-                printf("\n");
-        }
-        printf("\n\n");
     }
+
+	printf("\n\n");
 }
 
 int select_device_by_name(char *dev_name, char *errbuf) {
@@ -99,7 +138,7 @@ int select_device_by_name(char *dev_name, char *errbuf) {
 		}
 		if (i != 0) dev_name[i] = 0;	
 	}
-
+	
 	printf("you select device: [%s]\n", dev_name);
 	return 0;
 }
@@ -147,6 +186,10 @@ int main(int argc, char **argv) {
 			fprintf(stderr, "pcap_compile: %s, please input again....\n")
 	}
 */
+
+	pcap_compile(phandle, &fcode, "src host 47.100.45.27 or dst host 47.100.45.27", 1, 0);
+	pcap_setfilter(phandle, &fcode);
+
 	if ((datalink = pcap_datalink(phandle) == -1)) {
 		fprintf(stderr, "pcap_datalink: %s\n", pcap_geterr(phandle));
 		return 1;

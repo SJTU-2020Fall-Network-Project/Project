@@ -5,6 +5,8 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #define DEV_NAME_LEN 20
 
@@ -55,18 +57,25 @@ char *Proto[] = {
 	"Reserved","ICMP","IGMP","GGP", "IP","ST","TCP"
 };
 // 17 = "UDP"
-char *str_flags[] = { "[]", "[FIN]", "[SYN]", "[SYN, FIN]", "[RST]", "[RST, FIN]", "[RST, SYN]",
-					 "[RST, SYN, FIN]", "[PSH]", "[PSH, FIN]", "[PSH, SYN]",  "[PSH, SYN, FIN]",
-					 "[PSH, RST]", "[PSH, RST, FIN]", "[PSH, RST, SYN]", "[PSH, RST, SYN, FIN]", 
-					 "[ACK]", "[ACK, FIN]", "[ACK, SYN]", "[ACK, SYN, FIN]", "[ACK, RST]", 
-					 "[ACK, RST, FIN]", "[ACK, RST, SYN]", "[ACK, RST, SYN, FIN]", "[ACK, PSH]", 
-					 "[ACK, PSH, FIN]", "[ACK, PSH, SYN]", "[ACK, PSH, SYN, FIN]", 
-					 "[ACK, PSH, RST]", "[ACK, PSH, RST, FIN]", "[ACK, PSH, RST, SYN]",
-					 "[ACK, PSH, RST, SYN, FIN]" };
+char *str_flags[] = {
+	"[]", "[FIN]", "[SYN]", "[SYN, FIN]", "[RST]", "[RST, FIN]", "[RST, SYN]",
+	"[RST, SYN, FIN]", "[PSH]", "[PSH, FIN]", "[PSH, SYN]",  "[PSH, SYN, FIN]",
+	"[PSH, RST]", "[PSH, RST, FIN]", "[PSH, RST, SYN]", "[PSH, RST, SYN, FIN]", 
+	"[ACK]", "[ACK, FIN]", "[ACK, SYN]", "[ACK, SYN, FIN]", "[ACK, RST]", 
+	"[ACK, RST, FIN]", "[ACK, RST, SYN]", "[ACK, RST, SYN, FIN]", "[ACK, PSH]", 
+	"[ACK, PSH, FIN]", "[ACK, PSH, SYN]", "[ACK, PSH, SYN, FIN]", 
+	"[ACK, PSH, RST]", "[ACK, PSH, RST, FIN]", "[ACK, PSH, RST, SYN]",
+	"[ACK, PSH, RST, SYN, FIN]" 
+};
 
 void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *pkt_data) {
-	static struct timeval last_ts;
+	static struct timeval start_ts;
+	static struct timeval next_ts;
+	static int ofd = -1;
+	static char of_name[50];
+	char of_buf[100];
 	struct timeval now_ts;
+	const unsigned long interval_usec = 2000; // 2ms
 	ETHHEADER *eth_header = (ETHHEADER *)pkt_data;
 
 	printf("Packet length: %d \n", header->len);
@@ -83,26 +92,41 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 		int ack = tcp_header->flags & ACK;
 		if (syn && !ack) { 
 				printf("begin to connecting\n");
-				last_ts.tv_sec = header->ts.tv_sec;
-				last_ts.tv_usec = header->ts.tv_usec;
+				start_ts.tv_sec = header->ts.tv_sec;
+				start_ts.tv_usec = header->ts.tv_usec;
+				next_ts.tv_usec = 0;
+				next_ts.tv_sec = 0;
+				if (ofd != -1) close(ofd);
+				sprintf(of_name, "output_%4lx", header->ts.tv_usec & 0xFFFF);
+				ofd = open(of_name, O_WRONLY | O_CREAT, 0777);
 		}
-		if (last_ts.tv_usec > header->ts.tv_usec) {
-			now_ts.tv_sec = header->ts.tv_sec - last_ts.tv_sec - 1;
-			now_ts.tv_usec = header->ts.tv_usec + 1000000 - last_ts.tv_usec;
+		if (start_ts.tv_usec > header->ts.tv_usec) {
+			now_ts.tv_sec = header->ts.tv_sec - start_ts.tv_sec - 1;
+			now_ts.tv_usec = header->ts.tv_usec + 1000000 - start_ts.tv_usec;
 		} else {
-			now_ts.tv_sec = header->ts.tv_sec - last_ts.tv_sec;
-			now_ts.tv_usec = header->ts.tv_usec - last_ts.tv_usec;
+			now_ts.tv_sec = header->ts.tv_sec - start_ts.tv_sec;
+			now_ts.tv_usec = header->ts.tv_usec - start_ts.tv_usec;
 		}
 
+		if ((now_ts.tv_sec == next_ts.tv_sec && now_ts.tv_usec > next_ts.tv_usec) || now_ts.tv_sec > next_ts.tv_sec) {
+			unsigned long x = next_ts.tv_usec + interval_usec;
+			next_ts.tv_usec = x % 1000000;
+			next_ts.tv_sec += x / 1000000;
+		}
 			
 		printf("%ld.%06ld : Source IP : %d.%d.%d.%d ==> ", now_ts.tv_sec, now_ts.tv_usec, ip_header->sourceIP[0], ip_header->sourceIP[1], ip_header->sourceIP[2], ip_header->sourceIP[3]);
 		printf("Dest   IP : %d.%d.%d.%d\n", ip_header->destIP[0], ip_header->destIP[1], ip_header->destIP[2], ip_header->destIP[3]);
 		printf("            seq %u , ack %u\n", tcp_header->seq, tcp_header->ack);
 		printf("            %s\n", str_flags[tcp_header->flags & 0x1F]);
 		printf("            window size: %d Bytes", tcp_header->window_size);
-	
-
-
+		sprintf(of_buf, "%d,%ld.%06ld,%d.%d.%d.%d,%d.%d.%d.%d,%u,%u,%s,%d\n", header->len,
+						now_ts.tv_sec, now_ts.tv_usec, ip_header->sourceIP[0], ip_header->sourceIP[1],
+						ip_header->sourceIP[2], ip_header->sourceIP[3], ip_header->destIP[0],
+						ip_header->destIP[1], ip_header->destIP[2], ip_header->destIP[3],
+						tcp_header->seq, tcp_header->ack, str_flags[tcp_header->flags & 0x1F],
+						tcp_header->window_size);
+		
+		write(ofd, of_buf, strlen(of_buf));
     }
 
 	printf("\n\n");

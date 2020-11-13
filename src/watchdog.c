@@ -68,9 +68,11 @@ char *str_flags[] = {
 	"[ACK, PSH, RST, SYN, FIN]" 
 };
 
-bool cmp_ip(char ip[4]) {
-	static char sv_ip[4] = {0x2F, 0x64, 0x2D, 0x1B};
-	return (ip[0]==sv_ip[0]) && (ip[1]==sv_ip[1]) && (ip[2]==sv_ip[2]) && (ip[3]==sv_ip[3]);
+int cmp_ip(char ip[4]) {
+	static char sv_ip[4] = {47, 100, 45, 27};
+	if ((ip[0]==sv_ip[0]) && (ip[1]==sv_ip[1]) && (ip[2]==sv_ip[2]) && (ip[3]==sv_ip[3]))
+		return 1;
+	return 0;
 }
 
 void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *pkt_data) {
@@ -79,7 +81,7 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 	static int ofd = -1;
 	static char of_name[50];
 	static uint32_t yf_seq, sv_seq; // yifan's seq, server's seq
-	
+
 	char of_buf[100];
 	struct timeval now_ts;
 	const unsigned long interval_usec = 2000; // 2ms
@@ -98,26 +100,24 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 		int syn = tcp_header->flags & SYN;
 		int ack = tcp_header->flags & ACK;
 		if (syn && !ack) { 
-				printf("begin to connecting\n");
-				start_ts.tv_sec = header->ts.tv_sec;
-				start_ts.tv_usec = header->ts.tv_usec;
-				next_ts.tv_usec = 0;
-				next_ts.tv_sec = 0;
-				if (cmp_ip(ip_header->sourceIP)) {
-					sv_seq = tcp_header->seq;
-				} else {
-					yf_seq = tcp_header->seq;
-				}
-				if (ofd != -1) close(ofd);
-				sprintf(of_name, "output_%4lx", header->ts.tv_usec & 0xFFFF);
-				ofd = open(of_name, O_WRONLY | O_CREAT, 0777);
-		} else if (syn && ack) {
-			if (cmp_ip(ip_header->sourceIP)) {
-				sv_seq = tcp_header->seq;
-			} else {
-				sv_seq = tcp_header->seq;
-			}
+			printf("begin to connecting\n");
+			start_ts.tv_sec = header->ts.tv_sec;
+			start_ts.tv_usec = header->ts.tv_usec;
+			next_ts.tv_usec = 0;
+			next_ts.tv_sec = 0;
+			if (cmp_ip(ip_header->sourceIP)) 
+				sv_seq = ntohl(tcp_header->seq);
+			else 
+				yf_seq = ntohl(tcp_header->seq);
 
+			if (ofd != -1) close(ofd);
+			sprintf(of_name, "output_%4lx", header->ts.tv_usec & 0xFFFF);
+			ofd = open(of_name, O_WRONLY | O_CREAT, 0777);
+		} else if (syn && ack) {
+			if (cmp_ip(ip_header->sourceIP))
+				sv_seq = ntohl(tcp_header->seq);
+			else 
+				yf_seq = ntohl(tcp_header->seq);
 		}
 		if (start_ts.tv_usec > header->ts.tv_usec) {
 			now_ts.tv_sec = header->ts.tv_sec - start_ts.tv_sec - 1;
@@ -132,14 +132,16 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 			next_ts.tv_usec = x % 1000000;
 			next_ts.tv_sec += x / 1000000;
 		}
-			
+
 		if (cmp_ip(ip_header->sourceIP)) {
-			tcp_header->seq -= sv_seq;
-			tcp_header->ack -= yf_seq;
+			tcp_header->seq = ntohl(tcp_header->seq) - sv_seq;
+			tcp_header->ack = ntohl(tcp_header->ack) - yf_seq;
 		} else {
-			tcp_header->seq -= yf_seq;
-			tcp_header->ack -= sv_seq;
+			tcp_header->seq = ntohl(tcp_header->seq) - yf_seq;
+			tcp_header->ack = ntohl(tcp_header->ack) - sv_seq;
 		}
+
+			
 		printf("%ld.%06ld : Source IP : %d.%d.%d.%d ==> ", now_ts.tv_sec, now_ts.tv_usec, ip_header->sourceIP[0], ip_header->sourceIP[1], ip_header->sourceIP[2], ip_header->sourceIP[3]);
 		printf("Dest   IP : %d.%d.%d.%d\n", ip_header->destIP[0], ip_header->destIP[1], ip_header->destIP[2], ip_header->destIP[3]);
 		printf("            seq %u , ack %u\n", tcp_header->seq, tcp_header->ack);

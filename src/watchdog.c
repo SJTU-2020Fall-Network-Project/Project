@@ -37,7 +37,7 @@ typedef struct {
 	uint16_t dst_port;
 	uint32_t seq;
 	uint32_t ack;
-	uint8_t data_offset; // 4 bits
+	uint8_t data_offset; // 4 bits ; pos = data_offset * 4 bytes
 	uint8_t flags;
 #define FIN 0x01
 #define SYN 0x02
@@ -51,6 +51,12 @@ typedef struct {
 	uint16_t checksum;
 	uint16_t urgent_p;
 }TCPHEADER;
+
+// TCP option
+typedef struct {
+	uint8_t kind;
+	uint8_t size;
+}TCPOPTION;
 
 // 
 char *Proto[] = {
@@ -67,6 +73,60 @@ char *str_flags[] = {
 	"[ACK, PSH, RST]", "[ACK, PSH, RST, FIN]", "[ACK, PSH, RST, SYN]",
 	"[ACK, PSH, RST, SYN, FIN]" 
 };
+/* select_packet
+ *		sender -> receiver
+ */
+void select_packet(struct timeval *now_ts, int len, uint32_t seq, uint32_t ack, uint16_t rwnd, int flag) {
+	static uint32_t unack_seq = 0; // the next seq sender to send
+	static uint32_t acked_seq = 0; // the next seq receiver want
+	static uint32_t flight_size = 0;
+	static int dupack_num = 0;
+	int MSS = 1460;
+	int cwnd = 10;
+	if (flag) {
+	// the packet is from sender to receiver.
+		if (len < MSS) return;
+		int num = len / MSS;
+		if (num * MSS > len) ++num;
+		unack_seq += seq + num * MSS;
+	
+		/* Decision process for the classification of out-of-sequence packets
+		 *              +--------------------+
+		 *              |packet alredy ack'd?|
+		 *              +--------------------+
+		 *                         |  yes
+		 *                         |-------> Unneeded Retransmission
+		 *                       no|
+		 *                         v
+		 *              +--------------------+
+		 *              |packet already seen |
+		 *              +--------------------+
+		 *                         |        +----------------------+
+		 *                         |   no   |   Time lag > RTO ?   |  no   +------------------+  no
+		 *                         |------->|         OR           |------>| Time lag < RTT ? |------> unknown
+		 *                         |        | Duplicate acks > 3 ? |       +------------------+
+		 *                      yes|        +----------------------+                |  yes
+		 *                         |                   |                            +-------> Reordering
+		 *                         v                   |yes
+		 *              +----------------------+       |
+		 *              |  IP ID different ?   |       |
+		 *              |          OR          | yes   v
+		 *              |   Time lag > RTO ?   |-----> Retransmission
+		 *              |          OR          |
+		 *              | Duplicate acks > 3 ? |
+		 *              +----------------------+
+		 *                         | no
+		 *                         +----> Network Duplicate
+		 */
+	} else {
+		if (acked_seq > ack) return; // dup packet, just ignore
+		if (acked_seq == ack) ++dupack_num;
+		
+		acked_seq = ack;
+	
+	}
+
+}
 
 int cmp_ip(char ip[4]) {
 	static char sv_ip[4] = {47, 100, 45, 27};
@@ -95,7 +155,7 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
         if(ip_header->proto != 6) return;
 		
 		TCPHEADER *tcp_header = (TCPHEADER *)(pkt_data+14+((ip_header->ver_ihl & 0x0F)<<2));
-       	
+       	int data_len = ntohs(ip_header->total_len) - ((ip_header->ver_ihl & 0xF) << 2) - (tcp_header->data_offset >> 2);
 		// need to check RST?
 		int syn = tcp_header->flags & SYN;
 		int ack = tcp_header->flags & ACK;
@@ -146,13 +206,41 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 		printf("Dest   IP : %d.%d.%d.%d\n", ip_header->destIP[0], ip_header->destIP[1], ip_header->destIP[2], ip_header->destIP[3]);
 		printf("            seq %u , ack %u\n", tcp_header->seq, tcp_header->ack);
 		printf("            %s\n", str_flags[tcp_header->flags & 0x1F]);
-		printf("            window size: %d Bytes", tcp_header->window_size);
-		sprintf(of_buf, "%d,%ld.%06ld,%d.%d.%d.%d,%d.%d.%d.%d,%u,%u,%s,%d\n", header->len,
+		//printf("            window size: %d Bytes", tcp_header->window_size);
+		uint16_t mss = 0;
+		/*
+		{
+			int header_length = (tcp_header->data_offsize & 0xF0) >> 2;
+			uint8_t *opt = (uint8_t *)tcp_header + 20;
+			printf("            header length : %d Bytes", header_length);
+			header_length -= 20;
+			while (header_length > 0) {
+				TCPOPTION *opt_ = (TCPOPTION *)opt;
+				if (opt_->kind == 0) break;
+				if (opt_->kind == 1) { header_length -= 1; ++opt; continue;}
+				if (opt_->kind == 2) {
+					mss = ntohs((uint16_t)*(opt + 2));
+					printf("            MSS: %d\n", mss);
+				}
+
+				
+				
+
+				header_length -= opt_->size;
+				opt = opt + opt_->size;
+
+
+			}
+
+		}
+		*/
+		select_packet(&now_ts, data_len, tcp_header->seq, tcp_header->ack, ntohs(tcp_header->window_size), cmp_ip(ip_header->sourceIP));
+		sprintf(of_buf, "%d,%ld.%06ld,%d.%d.%d.%d,%d.%d.%d.%d,%u,%u,%s,%d\n", data_len,
 						now_ts.tv_sec, now_ts.tv_usec, ip_header->sourceIP[0], ip_header->sourceIP[1],
 						ip_header->sourceIP[2], ip_header->sourceIP[3], ip_header->destIP[0],
 						ip_header->destIP[1], ip_header->destIP[2], ip_header->destIP[3],
 						tcp_header->seq, tcp_header->ack, str_flags[tcp_header->flags & 0x1F],
-						tcp_header->window_size);
+						ntohs(tcp_header->window_size));
 		
 		write(ofd, of_buf, strlen(of_buf));
     }

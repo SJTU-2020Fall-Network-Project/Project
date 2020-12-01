@@ -1,0 +1,30 @@
+import matplotlib.pyplot as plt
+import numpy as np
+
+filename = input()
+file = open(filename)
+x = []
+y = []
+last_seq = 0
+ack_seq = 0
+mss = 1368
+for line in file:
+    line = line.split(',')
+    seq = int(line[4])
+    ack = int(line[5])
+    if line[2] != '47.100.45.27':
+        if ack_seq > ack:
+            continue
+        ack_seq = ack
+    else:
+        if seq < ack_seq:
+            continue
+        if seq > last_seq:
+            last_seq = seq
+
+    x.append(float(line[1]))
+    y.append(last_seq - ack_seq + mss)
+
+plt.figure()
+plt.scatter(x,y,c='k', s=1)
+plt.show()

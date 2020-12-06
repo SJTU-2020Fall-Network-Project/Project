@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 #include <WinSock2.h>
 #include <pcap.h>
 #include "utils.h"
@@ -9,7 +10,82 @@ int select_device_by_name(char *, char *);
 *		sender -> receiver
 */
 
+void select_packet_cubic(struct timeval *now_ts, int len, uint32_t seq, uint32_t ack, uint16_t rwnd, int flag) {
+	static uint32_t last_seq = 0; // the newest packet already seen
+	static uint32_t ack_seq = 0; // the newest ack
+	static uint32_t phase_start_seq = 0;
+	static uint32_t Wmax = 0;
+	static double K = 0;
+	static double C = 0.04;
+	static long phase_start_sec = 0;
+	static int fal_num = 0;
+	static int dupack_num = 0;
+	static int ssthresh = 65536;	 // = beta * W_max
+	int MSS = 1460;
+	int cwnd = 10;
 
+	if (flag) {
+		// the packet is from sender to receiver.
+		// Assume TSO is closed, each packet's len <= MSS
+		if (len < MSS) return; // not data packet
+		if (seq < ack_seq) return;	// already ack'd
+		// validate packet
+		// init phase_start_seq
+		if (phase_start_seq == 0) {
+			phase_start_seq = seq;
+			phase_start_sec = now_ts->tv_sec;
+			ack_seq = seq;
+		}
+		// 
+		if (seq > last_seq) { 
+			last_seq = seq; 
+			uint32_t flight_size = (last_seq - ack_seq) / MSS + 1;
+			if (flight_size > cwnd) {
+				++fal_num;
+			}
+			return; 
+		}
+		if (seq == ack_seq && dupack_num > 3) {
+			// Reransmission
+			// beta = 0.7
+			
+			// Wmax is W_last_max, cwnd is new W_max
+			if (cwnd < Wmax)
+				Wmax = 0.85 * cwnd;
+			else Wmax = cwnd;
+			
+			ssthresh = cwnd * 0.7;
+			ssthresh = max(ssthresh, 2);
+			cwnd = cwnd * 0.7;
+			K = pow(Wmax*0.3 / C, 1.0 / 3);
+		}
+	}
+	else {
+		if (ack_seq > ack || ack < MSS) return; // dup packet, just ignore
+		if (ack_seq == ack /* && */) { ++dupack_num; return; }
+		// else
+		if (dupack_num > 3) {
+			phase_start_seq = ack;
+			phase_start_sec = now_ts->tv_sec;
+		}
+		dupack_num = 0;
+		
+		// new ack
+		// slow-start at the beginning
+		if (cwnd < ssthresh) { // after the first congetstion, cwnd always > ssthresh
+			int acked = (ack - ack_seq) / MSS; /* the number of packets acked */
+			/* slow-start phase */
+			cwnd = cwnd + acked;
+		}
+		else {
+			long d_sec = now_ts->tv_sec - phase_start_sec;
+			double x = (d_sec - K);
+			cwnd = Wmax + C * x * x * x;
+		}
+
+		ack_seq = ack;
+	}
+}
 
 void select_packet_reno(struct timeval *now_ts, int len, uint32_t seq, uint32_t ack, uint16_t rwnd, int flag) {
 	static uint32_t last_seq = 0; // the newest packet already seen
@@ -40,7 +116,7 @@ void select_packet_reno(struct timeval *now_ts, int len, uint32_t seq, uint32_t 
 			phase_start_seq = seq;
 		// 
 		if (seq > last_seq) { last_seq = seq; return; }
-		if (seq == last_seq && dupack_num > 3) {
+		if (seq == ack_seq && dupack_num > 3) {
 			// Reransmission
 			// 1. calculate new ocwnd (cwnd before it deflates)
 			int acked = (ack_seq - phase_start_seq) / MSS; /* the number of packets acked */

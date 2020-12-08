@@ -10,19 +10,20 @@ int select_device_by_name(char *, char *);
 *		sender -> receiver
 */
 
-void select_packet_cubic(struct timeval *now_ts, int len, uint32_t seq, uint32_t ack, uint16_t rwnd, int flag) {
+void select_packet_cubic(struct timeval *now_ts, unsigned int len, uint32_t seq, uint32_t ack, uint16_t rwnd, int flag) {
 	static uint32_t last_seq = 0; // the newest packet already seen
 	static uint32_t ack_seq = 0; // the newest ack
 	static uint32_t phase_start_seq = 0;
 	static uint32_t Wmax = 0;
 	static double K = 0;
 	static double C = 0.04;
+	static long phase_start_tv;
 	static long phase_start_sec = 0;
 	static int fal_num = 0;
 	static int dupack_num = 0;
-	static int ssthresh = 65536;	 // = beta * W_max
-	int MSS = 1460;
-	int cwnd = 10;
+	static unsigned int ssthresh = 60000;	 // = beta * W_max
+	unsigned int MSS = 1460;
+	static unsigned int cwnd = 10;
 
 	if (flag) {
 		// the packet is from sender to receiver.
@@ -33,16 +34,22 @@ void select_packet_cubic(struct timeval *now_ts, int len, uint32_t seq, uint32_t
 		// init phase_start_seq
 		if (phase_start_seq == 0) {
 			phase_start_seq = seq;
-			phase_start_sec = now_ts->tv_sec;
+			//phase_start_sec = now_ts->tv_sec;
+			phase_start_tv = now_ts->tv_sec * 1000000 + now_ts->tv_usec;
 			ack_seq = seq;
 		}
 		// 
 		if (seq > last_seq) { 
 			last_seq = seq; 
-			uint32_t flight_size = (last_seq - ack_seq) / MSS + 1;
+			/*
+			unsigned int flight_size = (last_seq - ack_seq) / MSS + 1;
+
+
+			printf("[cubic]\tflightsize: %d\tcwnd: %d\n", flight_size, cwnd);
 			if (flight_size > cwnd) {
 				++fal_num;
 			}
+			*/
 			return; 
 		}
 		if (seq == ack_seq && dupack_num > 3) {
@@ -51,13 +58,23 @@ void select_packet_cubic(struct timeval *now_ts, int len, uint32_t seq, uint32_t
 			
 			// Wmax is W_last_max, cwnd is new W_max
 			if (cwnd < Wmax)
-				Wmax = 0.85 * cwnd;
+				Wmax = (uint32_t)(0.85 * cwnd);
 			else Wmax = cwnd;
 			
-			ssthresh = cwnd * 0.7;
+			ssthresh = (unsigned int)(cwnd * 0.7);
 			ssthresh = max(ssthresh, 2);
-			cwnd = cwnd * 0.7;
+			cwnd = (unsigned int)(cwnd * 0.7);
 			K = pow(Wmax*0.3 / C, 1.0 / 3);
+
+
+			unsigned int flight_size = (last_seq - ack_seq) / MSS + 1;
+
+
+			printf("[cubic]\tflightsize: %d\tcwnd: %d\n", flight_size, cwnd);
+			if (flight_size > cwnd) {
+				++fal_num;
+			}
+
 		}
 	}
 	else {
@@ -66,7 +83,8 @@ void select_packet_cubic(struct timeval *now_ts, int len, uint32_t seq, uint32_t
 		// else
 		if (dupack_num > 3) {
 			phase_start_seq = ack;
-			phase_start_sec = now_ts->tv_sec;
+			//phase_start_sec = now_ts->tv_sec;
+			phase_start_tv = now_ts->tv_sec * 1000000 + now_ts->tv_usec;
 		}
 		dupack_num = 0;
 		
@@ -78,16 +96,17 @@ void select_packet_cubic(struct timeval *now_ts, int len, uint32_t seq, uint32_t
 			cwnd = cwnd + acked;
 		}
 		else {
-			long d_sec = now_ts->tv_sec - phase_start_sec;
+			long d_sec = now_ts->tv_sec * 1000000 + now_ts->tv_usec - phase_start_tv;
+			d_sec = d_sec / 1000000;
 			double x = (d_sec - K);
-			cwnd = Wmax + C * x * x * x;
+			cwnd = (int)(Wmax + C * x * x * x);
 		}
 
 		ack_seq = ack;
 	}
 }
 
-void select_packet_reno(struct timeval *now_ts, int len, uint32_t seq, uint32_t ack, uint16_t rwnd, int flag) {
+void select_packet_reno(struct timeval *now_ts, unsigned int len, uint32_t seq, uint32_t ack, uint16_t rwnd, int flag) {
 	static uint32_t last_seq = 0; // the newest packet already seen
 	static uint32_t ack_seq = 0; // the newest ack
 	static uint32_t phase_start_seq = 0;
@@ -96,14 +115,14 @@ void select_packet_reno(struct timeval *now_ts, int len, uint32_t seq, uint32_t 
 	static int dupack_num = 0;
 	static int ssthresh = 65536;
 	int MSS = 1460;
-	int cwnd = 10;
+	static int cwnd = 10;
 	
 	/* forecast RTT */
 	/* I think no need to do */
 	static int state_RTT = 2; /* 0 is DEFAULT; 1 is FROZEN; 2 is INIT */
 	static uint32_t sample_RTT_seq = 0; // the first seq in next RTT
 	static uint32_t start_RTT_seq = 0;
-	static struct timeval start_RTT_ts = 0;
+	static struct timeval start_RTT_ts;
 	
 	if (flag) {
 		// the packet is from sender to receiver.
@@ -132,8 +151,9 @@ void select_packet_reno(struct timeval *now_ts, int len, uint32_t seq, uint32_t 
 				++cwnd;
 			}
 			// 2. calculate flightsize
-			int flightsize = last_seq - ack_seq + 1;
+			int flightsize = (last_seq - ack_seq) / MSS + 1;
 			
+			printf("[reno]\tflightsize: %d\tcwnd: %d\n", flightsize, cwnd);
 			if (flightsize > cwnd)
 				++fal_num;
 
@@ -221,7 +241,7 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 	const unsigned long interval_usec = 2000; // 2ms
 	ETHHEADER *eth_header = (ETHHEADER *)pkt_data;
 
-	printf("Packet length: %d \n", header->len);
+	//printf("Packet length: %d \n", header->len);
 
 	if (header->len >= 14 + 4) { // ether_header_len + ether_tailer_len
 		IPHEADER *ip_header = (IPHEADER*)(pkt_data + 14);
@@ -229,7 +249,7 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 		if (ip_header->proto != 6) return;
 
 		TCPHEADER *tcp_header = (TCPHEADER *)(pkt_data + 14 + ((ip_header->ver_ihl & 0x0F) << 2));
-		int data_len = ntohs(ip_header->total_len) - ((ip_header->ver_ihl & 0xF) << 2) - (tcp_header->data_offset >> 2);
+		unsigned int data_len = ntohs(ip_header->total_len) - ((ip_header->ver_ihl & 0xF) << 2) - (tcp_header->data_offset >> 2);
 		int is_from_sender = cmp_ip(ip_header->sourceIP);
 		// need to check RST? No!
 		int syn = tcp_header->flags & SYN;
@@ -283,7 +303,7 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 		{
 			int header_length = (tcp_header->data_offset & 0xF0) >> 2;
 			uint8_t *opt = (uint8_t *)tcp_header + 20;
-			printf("            header length : %d Bytes", header_length);
+			//printf("            header length : %d Bytes", header_length);
 			header_length -= 20;
 			while (header_length > 0) {
 				TCPOPTION *opt_ = (TCPOPTION *)opt;
@@ -312,10 +332,15 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 			}
 
 		}
-		if (is_from_sender)
+		
+		if (is_from_sender) {
 			select_packet_reno(&now_ts, data_len, tcp_header->seq, tcp_header->ack, ntohs(tcp_header->window_size) << sv_scale, 1);
-		else
+			//select_packet_cubic(&now_ts, data_len, tcp_header->seq, tcp_header->ack, ntohs(tcp_header->window_size) << sv_scale, 1);
+		}
+		else {
 			select_packet_reno(&now_ts, data_len, tcp_header->seq, tcp_header->ack, ntohs(tcp_header->window_size) << yf_scale, 0);
+			//select_packet_cubic(&now_ts, data_len, tcp_header->seq, tcp_header->ack, ntohs(tcp_header->window_size) << yf_scale, 0);
+		}
 		
 		sprintf(of_buf, "%d,%ld.%06ld,%d.%d.%d.%d,%d.%d.%d.%d,%u,%u,%s,%d,%d\n", data_len,
 			now_ts.tv_sec, now_ts.tv_usec, ip_header->sourceIP[0], ip_header->sourceIP[1],
@@ -328,7 +353,7 @@ void pcap_handle(u_char *user, const struct pcap_pkthdr *header, const u_char *p
 		
 	}
 
-	printf("\n\n");
+	//printf("\n\n");
 }
 
 

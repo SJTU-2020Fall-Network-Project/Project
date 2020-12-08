@@ -1,2 +1,3 @@
 ﻿  watchdog.c
-  watchdog.vcxproj -> C:\Users\legen\Source\Repos\watchdog\Debug\watchdog.exe
+c:\users\legen\source\repos\project\src\win\watchdog\watchdog\watchdog.c(130): warning C4018: “<”: 有符号/无符号不匹配
+  watchdog.vcxproj -> C:\Users\legen\Source\Repos\Project\src\win\watchdog\Debug\watchdog.exe
